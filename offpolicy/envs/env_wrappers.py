@@ -438,6 +438,15 @@ class DummyVecEnv(ShareVecEnv):
         for env in self.envs:
             env.close()
 
+    def render(self, mode):
+        if mode == 'rgb_array':
+            return np.array([env.render(mode=mode) for env in self.envs])
+        elif mode == "human":
+            for env in self.envs:
+                env.render(mode=mode)
+        else:
+            raise NotImplementedError
+
 
 class ShareDummyVecEnv(ShareVecEnv):
     def __init__(self, env_fns):

@@ -121,10 +121,10 @@ class R_MADDPGPolicy(RecurrentPolicy):
         else:
             if explore:
                 assert no_sequence, "Cannot do exploration on a sequence!"
-                actions = gaussian_noise(actor_out.shape, self.args.act_noise_std) + actor_out
+                actions = gaussian_noise(actor_out.shape, self.args.act_noise_std).to(self.device) + actor_out
             elif use_target and self.target_noise is not None:
                 assert isinstance(self.target_noise, float)
-                actions = gaussian_noise(actor_out.shape, self.target_noise) + actor_out
+                actions = gaussian_noise(actor_out.shape, self.target_noise).to(self.device) + actor_out
             else:
                 actions = actor_out
             # # clip the actions at the bounds of the action space

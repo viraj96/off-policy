@@ -1,52 +1,34 @@
-import sys
 import os
-import numpy as np
-from pathlib import Path
-import socket
+import sys
 import wandb
-import setproctitle
 import torch
+import socket
+import numpy as np
+import setproctitle
+from pathlib import Path
+
 from offpolicy.config import get_config
-from offpolicy.utils.util import get_cent_act_dim, get_dim_from_space
 from offpolicy.envs.mpe.MPE_Env import MPEEnv
 from offpolicy.envs.env_wrappers import DummyVecEnv, SubprocVecEnv
+from offpolicy.utils.util import get_cent_act_dim, get_dim_from_space
 
-
-def make_train_env(all_args):
+def make_render_env(all_args):
     def get_env_fn(rank):
         def init_env():
             if all_args.env_name == "MPE":
                 env = MPEEnv(all_args)
             else:
-                print("Can not support the " +
-                      all_args.env_name + "environment.")
+                print("Can not support the " + all_args.env_name + "environment.")
                 raise NotImplementedError
             env.seed(all_args.seed + rank * 1000)
             return env
         return init_env
+    
     if all_args.n_rollout_threads == 1:
         return DummyVecEnv([get_env_fn(0)])
     else:
         return SubprocVecEnv([get_env_fn(i) for i in range(all_args.n_rollout_threads)])
-
-
-def make_eval_env(all_args):
-    def get_env_fn(rank):
-        def init_env():
-            if all_args.env_name == "MPE":
-                env = MPEEnv(all_args)
-            else:
-                print("Can not support the " +
-                      all_args.env_name + "environment.")
-                raise NotImplementedError
-            env.seed(all_args.seed * 50000 + rank * 10000)
-            return env
-        return init_env
-    if all_args.n_eval_rollout_threads == 1:
-        return DummyVecEnv([get_env_fn(0)])
-    else:
-        return SubprocVecEnv([get_env_fn(i) for i in range(all_args.n_eval_rollout_threads)])
-
+    
 
 def parse_args(args, parser):
     parser.add_argument('--scenario_name', type=str,
@@ -70,22 +52,20 @@ def parse_args(args, parser):
 
     return all_args
 
-
 def main(args):
     parser = get_config()
     all_args = parse_args(args, parser)
 
-    # cuda and # threads
     if all_args.cuda and torch.cuda.is_available():
         print("choose to use gpu...")
-        device = torch.device("cuda:0")
+        device = torch.device('cuda')
         torch.set_num_threads(all_args.n_training_threads)
         if all_args.cuda_deterministic:
             torch.backends.cudnn.benchmark = False
             torch.backends.cudnn.deterministic = True
     else:
         print("choose to use cpu...")
-        device = torch.device("cpu")
+        device = torch.device('cpu')
         torch.set_num_threads(all_args.n_training_threads)
 
     # setup file to output tensorboard, hyperparameters, and saved models
@@ -131,8 +111,9 @@ def main(args):
     np.random.seed(all_args.seed)
 
     # create env
-    env = make_train_env(all_args)
+    eval_env = None
     num_agents = all_args.num_agents
+    env = make_render_env(all_args)
 
     # create policies and mapping fn
     if all_args.share_policy:
@@ -165,7 +146,6 @@ def main(args):
         eval_env = env
     elif all_args.algorithm_name in ["matd3", "maddpg", "masac", "mqmix", "mvdn"]:
         from offpolicy.runner.mlp.mpe_runner import MPERunner as Runner
-        eval_env = make_eval_env(all_args)
     else:
         raise NotImplementedError
 
@@ -180,21 +160,10 @@ def main(args):
               "run_dir": run_dir
               }
 
-    total_num_steps = 0
-    runner = Runner(config=config)
-    while total_num_steps < all_args.num_env_steps:
-        total_num_steps = runner.run()
+    runner = Runner(config)
+    runner.render()
 
     env.close()
-    if all_args.use_eval and (eval_env is not env):
-        eval_env.close()
-
-    if all_args.use_wandb:
-        run.finish()
-    else:
-        runner.writter.export_scalars_to_json(
-            str(runner.log_dir + '/summary.json'))
-        runner.writter.close()
 
 
 if __name__ == "__main__":

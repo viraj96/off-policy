@@ -80,7 +80,8 @@ class MlpRunner(object):
         self.env = config["env"]
         self.eval_env = config["eval_env"]
         self.num_envs = self.env.num_envs
-        self.num_eval_envs = self.eval_env.num_envs
+        if self.eval_env is not None:
+            self.num_eval_envs = self.eval_env.num_envs
 
         # dir
         self.model_dir = self.args.model_dir
@@ -95,6 +96,9 @@ class MlpRunner(object):
             self.save_dir = str(self.run_dir / 'models')
             if not os.path.exists(self.save_dir):
                 os.makedirs(self.save_dir)
+            self.gif_dir = str(self.run_dir / 'gifs')
+            if not os.path.exists(self.gif_dir):
+                os.makedirs(self.gif_dir)
 
         # initialize all the policies and organize the agents corresponding to each policy
         if self.algorithm_name == "matd3":
@@ -121,13 +125,14 @@ class MlpRunner(object):
         self.restorer = self.restore_q if self.algorithm_name in self.q_learning else self.restore
 
         self.policies = {p_id: Policy(config, self.policy_info[p_id]) for p_id in self.policy_ids}
+        
+        # initialize class for updating policies
+        self.trainer = TrainAlgo(self.args, self.num_agents, self.policies, self.policy_mapping_fn,
+                                 device=self.device)
 
         if self.model_dir is not None:
             self.restorer()
 
-        # initialize class for updating policies
-        self.trainer = TrainAlgo(self.args, self.num_agents, self.policies, self.policy_mapping_fn,
-                                 device=self.device)
 
         self.policy_agents = {policy_id: sorted(
             [agent_id for agent_id in self.agent_ids if self.policy_mapping_fn(agent_id) == policy_id]) for policy_id in

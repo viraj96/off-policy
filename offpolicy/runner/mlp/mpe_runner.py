@@ -1,3 +1,5 @@
+import copy
+from matplotlib import pyplot as plt
 import wandb
 import numpy as np
 from itertools import chain
@@ -5,6 +7,7 @@ import torch
 import time
 from offpolicy.utils.util import is_multidiscrete
 from offpolicy.runner.mlp.base_runner import MlpRunner
+from pud.envs.simple_navigation_env import plot_walls
 
 class MPERunner(MlpRunner):
     def __init__(self, config):
@@ -358,3 +361,143 @@ class MPERunner(MlpRunner):
             warmup_rewards.append(env_info['average_episode_rewards'])
         warmup_reward = np.mean(warmup_rewards)
         print("warmup average episode rewards: {}".format(warmup_reward))
+
+    @torch.no_grad()
+    def render(self):
+        """Visualize the env."""
+
+        env = self.env
+        n_rollout_threads = self.num_envs
+
+        all_frames = []
+        for episode in range(self.args.render_episodes):
+
+            p_id = "policy_0"
+            env_info = {}
+            policy = self.policies[p_id]
+
+            obs = env.reset()
+            if self.args.save_gifs:
+                image = env.render('rgb_array')[0][0]
+                all_frames.append(image)
+            else:
+                env.render("human")
+
+            share_obs = obs.reshape(n_rollout_threads, -1)
+
+            agent_goals = []
+            agent_dones = []
+            agent_trajectories = []
+
+            for idx, agent in enumerate(env.envs[0].world.agents):
+                agent_goals.append(copy.deepcopy(agent.goal))
+                agent_dones.append(False)
+                agent_trajectories.append([copy.deepcopy(agent.state.p_pos)])
+
+            # init
+            episode_rewards = []
+            step_obs = {}
+            step_share_obs = {}
+            step_acts = {}
+            step_rewards = {}
+            step_next_obs = {}
+            step_next_share_obs = {}
+            step_dones = {}
+            step_dones_env = {}
+            valid_transition = {}
+            step_avail_acts = {}
+            step_next_avail_acts = {}
+
+            for step in range(self.episode_length):
+                calc_start = time.time()
+                obs_batch = np.concatenate(obs)
+                # get actions with exploration noise (eps-greedy/Gaussian)
+                acts_batch, _ = policy.get_actions(obs_batch,
+                                                   t_env=self.total_env_steps,
+                                                   explore=False)
+
+                if not isinstance(acts_batch, np.ndarray):
+                    acts_batch = acts_batch.cpu().detach().numpy()
+                env_acts = np.split(acts_batch, n_rollout_threads)
+
+                # env step and store the relevant episode information
+                next_obs, rewards, dones, infos = env.step(env_acts)
+
+                episode_rewards.append(rewards)
+                dones_env = np.all(dones, axis=1)
+
+                print("Step ", step)
+                print("Dones ", dones)
+                print("Dones env ", dones_env)
+
+                if np.all(dones_env):
+                    average_episode_rewards = np.mean(np.sum(episode_rewards, axis=0))
+                    env_info["average_episode_rewards"] = average_episode_rewards
+                    break
+
+                next_share_obs = next_obs.reshape(n_rollout_threads, -1)
+
+                step_obs[p_id] = obs
+                step_share_obs[p_id] = share_obs
+                step_acts[p_id] = env_acts
+                step_rewards[p_id] = rewards
+                step_next_obs[p_id] = next_obs
+                step_next_share_obs[p_id] = next_share_obs
+                step_dones[p_id] = np.zeros_like(dones)
+                step_dones_env[p_id] = dones_env
+                valid_transition[p_id] = np.ones_like(dones)
+                step_avail_acts[p_id] = None
+                step_next_avail_acts[p_id] = None
+
+                obs = next_obs
+                share_obs = next_share_obs
+
+                if self.args.save_gifs:
+                    image = env.render("rgb_array")[0][0]
+                    all_frames.append(image)
+                    calc_end = time.time()
+                    elapsed = calc_end - calc_start
+                    if elapsed < self.args.ifi:
+                        time.sleep(self.args.ifi - elapsed)
+                else:
+                    env.render("human")
+
+                for idx, agent in enumerate(env.envs[0].world.agents):
+                    print("Dones [0][idx][0] ", dones[0][idx][0])
+                    if dones[0][idx][0]:
+                        agent_dones[idx] = True
+                        continue
+                    if not agent_dones[idx]:
+                        agent_trajectories[idx].append(copy.deepcopy(agent.state.p_pos))
+
+            average_episode_rewards = np.mean(np.sum(episode_rewards, axis=0))
+            env_info["average_episode_rewards"] = average_episode_rewards
+            print("average episode rewards: {}".format(average_episode_rewards))
+
+            plot_walls(env.envs[0].world.maze_walls)
+            agent_colors = "bgrcmykw"
+            for agent_id in range(self.num_agents):
+
+                print("Path of agent %i: " % agent_id)
+                print(agent_trajectories[agent_id])
+                print("Goal of agent %i: " % agent_id)
+                print(agent_goals[agent_id])
+
+                if agent_dones[agent_id]:
+                    agent_trajectories[agent_id].append(agent_goals[agent_id])
+                else:
+                    agent_trajectories[agent_id] = agent_trajectories[agent_id][:-1]
+
+                a_traj = np.array(agent_trajectories[agent_id])
+
+                plt.plot(a_traj[:, 0], a_traj[:, 1], "-o", color=agent_colors[agent_id], label="Agent %i" % agent_id, alpha=0.3)
+                plt.scatter([agent_goals[agent_id][0]], [agent_goals[agent_id][1]], color=agent_colors[agent_id], label="Agent %i Goal" % agent_id, s=100, marker = "*")
+                plt.scatter([a_traj[0, 0]], [a_traj[0, 1]], color=agent_colors[agent_id], label="Agent %i Start" % agent_id, s=100, marker = "+")
+                plt.scatter([a_traj[-1, 0]], [a_traj[-1, 1]], color=agent_colors[agent_id], label="Agent %i End" % agent_id, s=100, marker = "x")
+
+            plt.show()
+            plt.close()
+
+        if self.args.save_gifs:
+            import imageio
+            imageio.mimsave(str(self.gif_dir) + "/render.gif", all_frames, duration=self.args.ifi)

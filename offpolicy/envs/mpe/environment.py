@@ -176,7 +176,7 @@ class MultiAgentEnv(gym.Env):
                 return True
             else:
                 return False
-        return self.done_callback(agent, self.world)
+        return self.done_callback(agent, self.world, current_step=self.current_step)
 
     # get reward for a particular agent
     def _get_reward(self, agent):
@@ -226,10 +226,11 @@ class MultiAgentEnv(gym.Env):
                     agent.action.u = action[0][0:self.world.dim_p]
                     d = self.world.dim_p
 
-            sensitivity = 5.0
-            if agent.accel is not None:
-                sensitivity = agent.accel
-            agent.action.u *= sensitivity
+            if not hasattr(self.world, 'maze_walls'):
+                sensitivity = 5.0
+                if agent.accel is not None:
+                    sensitivity = agent.accel
+                agent.action.u *= sensitivity
 
             if (not agent.silent) and (not isinstance(action_space, MultiDiscrete)):
                 action[0] = action[0][d:]
@@ -254,7 +255,7 @@ class MultiAgentEnv(gym.Env):
         self.render_geoms = None
         self.render_geoms_xform = None
 
-    def render(self, mode='human', close=True):
+    def render(self, mode='human', close=False):
         if close:
             # close any existic renderers
             for i, viewer in enumerate(self.viewers):
@@ -378,8 +379,11 @@ class MultiAgentEnv(gym.Env):
                 pos = np.zeros(self.world.dim_p)
             else:
                 pos = self.agents[i].state.p_pos
-            self.viewers[i].set_bounds(
-                pos[0]-cam_range, pos[0]+cam_range, pos[1]-cam_range, pos[1]+cam_range)
+            if hasattr(self.world, 'maze_walls'):
+                self.viewers[i].set_bounds(0, 1, 0, 1)
+            else:
+                self.viewers[i].set_bounds(
+                    pos[0]-cam_range, pos[0]+cam_range, pos[1]-cam_range, pos[1]+cam_range)
             # update geometry positions
             for e, entity in enumerate(self.world.entities):
                 self.render_geoms_xform[e].set_translation(*entity.state.p_pos)

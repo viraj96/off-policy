@@ -38,7 +38,11 @@ def MPEEnv(args):
     # create world
     world = scenario.make_world(args)
     # create multiagent environment
-    env = MultiAgentEnv(world, scenario.reset_world,
-                        scenario.reward, scenario.observation)
+    env = MultiAgentEnv(world,
+                        scenario.reset_world,
+                        scenario.reward,
+                        scenario.observation,
+                        done_callback=scenario.done if hasattr(scenario, 'done') else None,
+                        discrete_action=scenario.discrete_action if hasattr(scenario, 'discrete_action') else True)
 
     return env

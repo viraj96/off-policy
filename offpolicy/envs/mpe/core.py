@@ -203,26 +203,72 @@ class World(object):
         for landmark in self.landmarks:
             landmark.color = np.array([0.25, 0.25, 0.25])
 
+    
+    def discretize_state(self, state, resolution=1.0):
+        assert hasattr(self, "maze_walls")
+        (i, j) = np.floor(resolution * state).astype(np.int64)
+        # Round down to the nearest cell if at the boundary.
+        if i == self.maze_walls.shape[0]: # type: ignore
+            i -= 1
+        if j == self.maze_walls.shape[1]:
+            j -= 1
+        return (i, j)
+
+    def maze_world_step(self):
+
+        for agent_id, agent in enumerate(self.agents):
+            if agent.u_noise is not None:
+                agent.action.u += np.random.normal(0, agent.u_noise, size=2)
+
+            agent.action.u = np.clip(agent.action.u, -agent.u_range, agent.u_range)
+
+            num_substeps = 10
+            dt = 1.0 / num_substeps
+            num_axis = len(agent.action.u)
+            for _ in np.linspace(0, 1, num_substeps):
+                for axis in range(num_axis):
+                    new_state = agent.state.p_pos.copy()
+                    # De-normalize the state before applying the action
+                    new_state[0] *= self.maze_walls.shape[0]  # type: ignore
+                    new_state[1] *= self.maze_walls.shape[1]  # type: ignore
+                    new_state[axis] += dt * agent.action.u[axis]
+                    out_of_bounds = (
+                        new_state[0] < 0
+                        or new_state[0] >= self.maze_walls.shape[0]  # type: ignore
+                        or new_state[1] < 0
+                        or new_state[1] >= self.maze_walls.shape[1]  # type: ignore
+                    )
+                    if not out_of_bounds:
+                        i, j = self.discretize_state(new_state)
+                        if self.maze_walls[i, j] == 0:  # type: ignore
+                            agent.state.p_pos = np.array([new_state[0] / float(self.maze_walls.shape[0]),  # type: ignore
+                                                         new_state[1] / float(self.maze_walls.shape[1])])  # type: ignore
+
     # update state of the world
     def step(self):
         self.world_step += 1
         # set actions for scripted agents
         for agent in self.scripted_agents:
             agent.action = agent.action_callback(agent, self)
-        # gather forces applied to entities
-        p_force = [None] * len(self.entities)
-        # apply agent physical controls
-        p_force = self.apply_action_force(p_force)
-        # apply environment forces
-        p_force = self.apply_environment_force(p_force)
-        # integrate physical state
-        self.integrate_state(p_force)
-        # update agent state
-        for agent in self.agents:
-            self.update_agent_state(agent)
-        # calculate and store distances between all entities
-        if self.cache_dists:
-            self.calculate_distances()
+
+        if hasattr(self, "maze_walls"):
+            self.maze_world_step()
+
+        else:
+            # gather forces applied to entities
+            p_force = [None] * len(self.entities)
+            # apply agent physical controls
+            p_force = self.apply_action_force(p_force)
+            # apply environment forces
+            p_force = self.apply_environment_force(p_force)
+            # integrate physical state
+            self.integrate_state(p_force)
+            # update agent state
+            for agent in self.agents:
+                self.update_agent_state(agent)
+            # calculate and store distances between all entities
+            if self.cache_dists:
+                self.calculate_distances()
 
     # gather agent action forces
     def apply_action_force(self, p_force):

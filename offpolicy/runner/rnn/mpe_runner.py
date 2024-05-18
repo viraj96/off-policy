@@ -1,8 +1,11 @@
+import copy
+from matplotlib import pyplot as plt
 import numpy as np
 import torch
 import time
 
 from offpolicy.runner.rnn.base_runner import RecRunner
+from pud.envs.simple_navigation_env import plot_walls
 
 class MPERunner(RecRunner):
     """Runner class for Multiagent Particle Envs (MPE). See parent class for more information."""
@@ -262,3 +265,139 @@ class MPERunner(RecRunner):
         self.env_infos = {}
 
         self.env_infos['average_episode_rewards'] = []
+
+    @torch.no_grad()
+    def render(self):
+        """Visualize the env."""
+        env = self.env
+
+        all_frames = []
+        for episode in range(self.args.render_episodes):
+
+            env_info = {}
+            # only 1 policy since all agents share weights
+            p_id = "policy_0"
+            policy = self.policies[p_id]
+
+            obs = env.reset()
+            if self.args.save_gifs:
+                image = env.render('rgb_array')[0][0]
+                all_frames.append(image)
+            else:
+                env.render("human")
+
+            agent_goals = []
+            agent_dones = []
+            agent_trajectories = []
+
+            for idx, agent in enumerate(env.envs[0].world.agents):
+                agent_goals.append(copy.deepcopy(agent.goal))
+                agent_dones.append(False)
+                agent_trajectories.append([copy.deepcopy(agent.state.p_pos)])
+
+
+            rnn_states_batch = np.zeros((self.num_envs * self.num_agents, self.hidden_size), dtype=np.float32)
+            last_acts_batch = np.zeros((self.num_envs * self.num_agents, policy.output_dim), dtype=np.float32)
+
+            # initialize variables to store episode information.
+            episode_obs = {p_id : np.zeros((self.episode_length + 1, self.num_envs, self.num_agents, policy.obs_dim), dtype=np.float32) for p_id in self.policy_ids}
+            episode_share_obs = {p_id : np.zeros((self.episode_length + 1, self.num_envs, self.num_agents, policy.central_obs_dim), dtype=np.float32) for p_id in self.policy_ids}
+            episode_acts = {p_id : np.zeros((self.episode_length, self.num_envs, self.num_agents, policy.output_dim), dtype=np.float32) for p_id in self.policy_ids}
+            episode_rewards = {p_id : np.zeros((self.episode_length, self.num_envs, self.num_agents, 1), dtype=np.float32) for p_id in self.policy_ids}
+            episode_dones = {p_id : np.ones((self.episode_length, self.num_envs, self.num_agents, 1), dtype=np.float32) for p_id in self.policy_ids}
+            episode_dones_env = {p_id : np.ones((self.episode_length, self.num_envs, 1), dtype=np.float32) for p_id in self.policy_ids}
+            episode_avail_acts = {p_id : None for p_id in self.policy_ids}
+
+            t = 0
+            while t < self.episode_length:
+                calc_start = time.time()
+                share_obs = obs.reshape(self.num_envs, -1)
+                # group observations from parallel envs into one batch to process at once
+                obs_batch = np.concatenate(obs)
+                # get actions for all agents to step the env
+                # get actions with exploration noise (eps-greedy/Gaussian)
+                acts_batch, rnn_states_batch, _ = policy.get_actions(obs_batch,
+                                                                    last_acts_batch,
+                                                                    rnn_states_batch,
+                                                                    t_env=self.total_env_steps,
+                                                                    explore=False)
+                acts_batch = acts_batch if isinstance(acts_batch, np.ndarray) else acts_batch.cpu().detach().numpy()
+                # update rnn hidden state
+                rnn_states_batch = rnn_states_batch if isinstance(rnn_states_batch, np.ndarray) else rnn_states_batch.cpu().detach().numpy()
+                last_acts_batch = acts_batch
+
+                env_acts = np.split(acts_batch, self.num_envs)
+                # env step and store the relevant episode information
+                next_obs, rewards, dones, infos = env.step(env_acts)
+
+                dones_env = np.all(dones, axis=1)
+                terminate_episodes = np.any(dones_env) or t == self.episode_length - 1
+                
+                print("Step ", t)
+                print("Dones ", dones)
+                print("Dones env ", dones_env)
+
+                episode_obs[p_id][t] = obs
+                episode_share_obs[p_id][t] = share_obs
+                episode_acts[p_id][t] = np.stack(env_acts)
+                episode_rewards[p_id][t] = rewards
+                episode_dones[p_id][t] = dones
+                episode_dones_env[p_id][t] = dones_env
+                t += 1
+
+                obs = next_obs
+
+                if terminate_episodes:
+                    break
+                
+                if self.args.save_gifs:
+                    image = env.render("rgb_array")[0][0]
+                    all_frames.append(image)
+                    calc_end = time.time()
+                    elapsed = calc_end - calc_start
+                    if elapsed < self.args.ifi:
+                        time.sleep(self.args.ifi - elapsed)
+                else:
+                    env.render("human")
+
+                for idx, agent in enumerate(env.envs[0].world.agents):
+                    print("Dones [0][idx][0] ", dones[0][idx][0])
+                    if dones[0][idx][0]:
+                        agent_dones[idx] = True
+                        continue
+                    if not agent_dones[idx]:
+                        agent_trajectories[idx].append(copy.deepcopy(agent.state.p_pos))
+
+            episode_obs[p_id][t] = obs
+            episode_share_obs[p_id][t] = obs.reshape(self.num_envs, -1)
+
+            average_episode_rewards = np.mean(np.sum(episode_rewards[p_id], axis=0))
+            env_info['average_episode_rewards'] = average_episode_rewards
+            
+            plot_walls(env.envs[0].world.maze_walls)
+            agent_colors = "bgrcmykw"
+            for agent_id in range(self.num_agents):
+
+                print("Path of agent %i: " % agent_id)
+                print(agent_trajectories[agent_id])
+                print("Goal of agent %i: " % agent_id)
+                print(agent_goals[agent_id])
+
+                if agent_dones[agent_id]:
+                    agent_trajectories[agent_id].append(agent_goals[agent_id])
+                else:
+                    agent_trajectories[agent_id] = agent_trajectories[agent_id][:-1]
+
+                a_traj = np.array(agent_trajectories[agent_id])
+
+                plt.plot(a_traj[:, 0], a_traj[:, 1], "-o", color=agent_colors[agent_id], label="Agent %i" % agent_id, alpha=0.3)
+                plt.scatter([agent_goals[agent_id][0]], [agent_goals[agent_id][1]], color=agent_colors[agent_id], label="Agent %i Goal" % agent_id, s=100, marker = "*")
+                plt.scatter([a_traj[0, 0]], [a_traj[0, 1]], color=agent_colors[agent_id], label="Agent %i Start" % agent_id, s=100, marker = "+")
+                plt.scatter([a_traj[-1, 0]], [a_traj[-1, 1]], color=agent_colors[agent_id], label="Agent %i End" % agent_id, s=100, marker = "x")
+
+            plt.show()
+            plt.close()
+
+        if self.args.save_gifs:
+            import imageio
+            imageio.mimsave(str(self.gif_dir) + "/render.gif", all_frames, duration=self.args.ifi)
